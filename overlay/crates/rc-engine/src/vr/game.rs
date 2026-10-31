@@ -1,7 +1,7 @@
 //! Stereo views of the ORIGINAL ReRAC world and its live game, including level changes.
 //! No level loader, entity renderer, hero physics or weapon implementation is duplicated here.
 use super::{
-    game_input::{GameInputPlugin, GamePad},
+    game_input::HeadsetFocusPlugin,
     Settings,
 };
 use bevy::{
@@ -10,8 +10,9 @@ use bevy::{
         visibility::RenderLayers, Camera3dDepthLoadOp, CameraOutputMode, ClearColorConfig,
         RenderTarget,
     },
-    core_pipeline::core_3d::Transparent3d,
+    core_pipeline::{core_3d::Transparent3d, Core2d, Core3d},
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    ecs::schedule::SingleThreadedExecutor,
     prelude::*,
     render::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
@@ -44,20 +45,13 @@ pub struct GameEye;
 struct EyeSky;
 #[derive(Component)]
 struct Panel(u8);
+#[derive(Component)]
+struct DestinationWarmup;
 #[derive(Resource, Default)]
 pub(super) struct Rig {
     center: Option<Vec3>,
     yaw: f32,
     reset_held: bool,
-}
-impl Rig {
-    pub(super) fn movement_from_head(&self, movement: Vec2, head: Quat) -> Vec2 {
-        if self.center.is_none() {
-            return movement;
-        }
-        let relative = heading(head) - self.yaw;
-        Vec2::from_angle(relative).rotate(movement)
-    }
 }
 #[derive(Resource, Clone, Default)]
 struct Rendered(Arc<AtomicU64>);
@@ -89,30 +83,36 @@ pub fn prepare_game() -> anyhow::Result<()> {
         // PS2 visibility masks were authored for one narrow view. Use original frustum/LOD culling with
         // an HMD envelope instead, so leaning/looking around doesn't reveal missing objects.
         std::env::set_var("RC_OCCL", "0");
-        for (key, value) in [
-            ("RC_LEVEL", "1"),
-            ("RC_FRONTEND", "0"),
-            ("RC_SCENE", "0"),
-            ("RC_PLAY", "1"),
-            ("RC_MSAA", "0"),
-        ] {
-            if std::env::var_os(key).is_none() {
-                std::env::set_var(key, value);
-            }
+        for key in ["RC_GIVE_ITEMS", "RC_GIVE_BOLTS", "RC_UNLOCK_PLANETS"] {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("RC_PLAY", "1");
+        std::env::set_var("RC_MSAA", "0");
+        for key in ["RC_LEVEL", "RC_SCENE", "RC_HERO_AT", "RC_VR_LEVEL", "RC_VR_MODE"] {
+            std::env::remove_var(key);
+        }
+        std::env::set_var("RC_FRONTEND", "1");
+        if std::env::var_os("RC_SAVE_DIR").is_none() {
+            std::env::set_var("RC_SAVE_DIR", std::path::Path::new("work/vr/saves/normal"));
         }
     }
     println!(
         "VR_GAME original ReRAC application; scene={} preview={} simulation=60Hz third-person",
         s.scene, s.desktop_preview
     );
-    println!("VR_GAME controls: left stick move; right stick game camera; A cross/jump/confirm; B square/wrench; X circle/weapon; Y triangle/quick select/back; left stick click select/map; right stick click start/pause; right trigger weapon; left trigger strafe; right grip crouch; keyboard F8 recenter");
+    println!("VR_GAME controls: PC gamepad uses the original ReRAC bindings; keyboard F8 recenters the headset");
     Ok(())
 }
 pub fn game_plugins(plugins: PluginGroupBuilder) -> PluginGroupBuilder {
     if !super::game_requested() {
         return plugins;
     }
-    let plugins = plugins.disable::<PipelinedRenderingPlugin>();
+    // Overlap simulation with the headset render and compositor wait.
+    let plugins = if std::env::var("RC_VR_PIPELINED").is_ok_and(|s| s.trim() == "0") {
+        plugins.disable::<PipelinedRenderingPlugin>()
+    } else {
+        plugins
+    };
     if std::env::var("RC_VR_DESKTOP_PREVIEW").is_ok_and(|s| s == "1") {
         plugins.set(bevy::render::RenderPlugin {
             render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
@@ -134,11 +134,11 @@ pub fn install_game(app: &mut App) -> anyhow::Result<()> {
     );
     let settings = Settings::from_env()?;
     let mirror_every = std::env::var("RC_VR_MIRROR_EVERY")
-        .unwrap_or_else(|_| "4".into())
+        .unwrap_or_else(|_| "0".into())
         .parse::<u32>()?;
     anyhow::ensure!(
-        (1..=120).contains(&mirror_every),
-        "RC_VR_MIRROR_EVERY must be 1..=120"
+        (0..=120).contains(&mirror_every),
+        "RC_VR_MIRROR_EVERY must be 0..=120"
     );
     let frames = Rendered::default();
     let draw = DrawAudit::default();
@@ -148,7 +148,7 @@ pub fn install_game(app: &mut App) -> anyhow::Result<()> {
         .insert_resource(frames.clone())
         .insert_resource(draw.clone())
         .insert_resource(MonitorCadence {
-            every: if settings.desktop_preview {
+            every: if settings.desktop_preview && std::env::var_os("RC_VR_MIRROR_EVERY").is_none() {
                 1
             } else {
                 mirror_every
@@ -187,7 +187,7 @@ pub fn install_game(app: &mut App) -> anyhow::Result<()> {
         .add_systems(
             PostUpdate,
             (
-                mirror_pass::<crate::scene_render::SceneFade>,
+                mirror_scene_fade,
                 mirror_pass::<crate::fog_state::UnderwaterTint>,
                 mirror_pass::<crate::screen_tint::ScreenTint>,
                 mirror_pass::<crate::visibomb_view::MissileViewOverlay>,
@@ -197,11 +197,22 @@ pub fn install_game(app: &mut App) -> anyhow::Result<()> {
         .insert_resource(frames)
         .insert_resource(draw)
         .add_systems(Render, count.after(RenderSystems::Render));
+    if !std::env::var("RC_VR_CAMERA_EXECUTOR").is_ok_and(|s| s.trim() == "multi") {
+        let render = app.sub_app_mut(RenderApp);
+        render.edit_schedule(Core3d, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+        render.edit_schedule(Core2d, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
+    app.add_plugins(super::loading::LoadingPlugin)
+        .add_plugins(super::fullscreen_refresh::FullscreenRefreshPlugin);
     if settings.desktop_preview {
         app.add_systems(Startup, preview_eyes);
     } else {
         app.insert_resource(OxrSessionConfig::default())
-            .add_plugins(GameInputPlugin)
+            .add_plugins(HeadsetFocusPlugin)
             .add_systems(Startup, super::require_headset)
             .add_systems(XrPreDestroySession, reset_session)
             .add_systems(XrSessionCreated, configure_eyes.after(XrViewInit));
@@ -212,11 +223,15 @@ pub fn install_game(app: &mut App) -> anyhow::Result<()> {
         PostUpdate,
         sky_policy
             .after(crate::sky_render::follow_main_camera)
+            .after(crate::flight_render::FlightSkySet)
+            .after(crate::title_world::TitleWorldViewSet)
             .after(update_views)
             .before(TransformSystems::Propagate),
     );
+    app.add_systems(PostUpdate, warm_destination.after(sky_policy).before(TransformSystems::Propagate));
     Ok(())
 }
+
 // The monitor is an extra full world render. Refresh it less often during VR gameplay;
 // the headset and simulation still update every frame. Menus retain their original full frame.
 // Restore before the original systems run, so their own camera activation remains authoritative.
@@ -239,7 +254,11 @@ fn pace_monitor_cameras(
     >,
 ) {
     cadence.frame = cadence.frame.wrapping_add(1);
-    if mode.state.mode != rc_game::menus::mode::Mode::Gameplay || cadence.frame % cadence.every == 0
+    if matches!(mode.state.mode,
+        rc_game::menus::mode::Mode::Menu | rc_game::menus::mode::Mode::Freeze |
+        rc_game::menus::mode::Mode::Vendor | rc_game::menus::mode::Mode::Movie |
+        rc_game::menus::mode::Mode::Slideshow)
+        || (cadence.every > 0 && cadence.frame % cadence.every == 0)
     {
         return;
     }
@@ -302,6 +321,29 @@ fn mirror_pass<T: Component + Clone + PartialEq>(
                 commands.entity(e).remove::<T>();
             }
             _ => {}
+        }
+    }
+}
+
+fn mirror_scene_fade(
+    mut commands: Commands,
+    loading: Res<super::loading::Hold>,
+    travel: Res<crate::travel_render::Travel>,
+    main: Query<Option<&crate::scene_render::SceneFade>, With<crate::fly_cam::FlyCam>>,
+    eyes: Query<(Entity, Option<&crate::scene_render::SceneFade>), With<GameEye>>,
+) {
+    let native = main.iter().next().flatten().copied();
+    let enabled = native.is_some() || travel.in_transition() || loading.opacity() > 0.0;
+    let mut want = native.unwrap_or_default();
+    if loading.opacity() > 0.0 {
+        let native_black = if want.rgba.truncate() == UVec3::ZERO { want.rgba.w } else { 0 };
+        want.rgba = UVec4::new(0, 0, 0, native_black.max((loading.opacity() * 128.0).ceil() as u32));
+    }
+    for (entity, have) in &eyes {
+        if enabled {
+            if have != Some(&want) { commands.entity(entity).insert(want); }
+        } else if have.is_some() {
+            commands.entity(entity).remove::<crate::scene_render::SceneFade>();
         }
     }
 }
@@ -460,13 +502,17 @@ fn follow_game_camera(
     settings: Res<Settings>,
     views: Option<Res<OxrViews>>,
     view: Option<Res<crate::play_camera::PlayView>>,
+    play: Option<Res<crate::gameplay::Play>>,
+    mode: Res<crate::menu_render::MenuMode>,
+    travel: Res<crate::travel_render::Travel>,
     focus: Option<Res<super::game_input::Focused>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut rig: ResMut<Rig>,
     mut roots: Query<&mut Transform, (With<XrTrackingRoot>, Without<crate::fly_cam::FlyCam>)>,
     mut main: Query<&mut Transform, (With<crate::fly_cam::FlyCam>, Without<XrTrackingRoot>)>,
 ) {
-    let Some(view) = view else { return };
+    super::loading::set_render_eye(None, false);
+    if view.is_none() && !crate::saves::front_end_active() && !travel.blanked() { return; }
     // Startup poses while the headset is on the desk are not the player's neutral pose.
     if !settings.desktop_preview && !focus.as_ref().is_some_and(|f| f.0) {
         return;
@@ -484,48 +530,85 @@ fn follow_game_camera(
         println!("VR_GAME recentered from focused headset pose: center={:?} yaw={:.3}", head.translation, rig.yaw);
     }
     rig.reset_held = reset;
-    let base = main
-        .iter()
-        .next()
-        .map(|t| *t)
-        .unwrap_or_else(|| crate::play_camera::view_transform(&view.view));
+    let native = main.iter().next().map(|transform| *transform);
+    let gameplay = mode.state.mode == rc_game::menus::mode::Mode::Gameplay
+        && !travel.blanked() && !crate::saves::front_end_active();
+    let play_view = view.as_deref().map(|view| crate::play_camera::view_transform(&view.view));
+    let base = if gameplay { play_view.or(native) } else { native.or(play_view) };
+    let Some(base) = base else { return };
     let root = rig_transform(base, rig.center.unwrap(), rig.yaw, settings.units_per_metre);
     for mut r in &mut roots {
         *r = root;
     }
     let center = root.mul_transform(head);
-    for mut t in &mut main {
-        // Original camera projection stays intact for the window; projection_tans expands only culling.
-        *t = center;
+    super::loading::set_render_eye(Some(center), crate::visibomb_view::missile_view(play.as_deref()));
+    if gameplay {
+        for mut t in &mut main {
+            // Keep the native menu, cinematic and interplanetary flight shots for their own layers.
+            *t = center;
+        }
     }
 }
-fn sky_policy(
-    mut cams: Query<(&mut Camera, &mut Camera3d, Has<EyeSky>, Has<GameEye>)>,
+
+fn warm_destination(
+    mut commands: Commands,
     level: Res<crate::Level>,
+    eyes: Query<(&RenderTarget, &Projection, &Msaa), With<GameEye>>,
+    warm: Query<Entity, With<DestinationWarmup>>,
 ) {
-    let has_sky = level.0.sky.is_some();
-    for (mut c, mut d, sky, world) in &mut cams {
+    if !super::loading::streaming() || super::loading::destination_ready() {
+        for entity in &warm { commands.entity(entity).despawn(); }
+        return;
+    }
+    if !warm.is_empty() { return; }
+    let mobys = &level.0.mobys;
+    let Some(hero) = mobys.instances.iter().zip(&mobys.placed)
+        .find(|(instance, placed)| instance.o_class == 0 && placed.is_some())
+        .map(|(instance, _)| instance) else { return };
+    let Some((target, projection, msaa)) = eyes.iter().next() else { return };
+    let view = Transform::from_translation(crate::tfrag_render::game_to_bevy(hero.position) + Vec3::Y * 1.1)
+        .with_rotation(Quat::from_rotation_y(hero.rotation[2] - std::f32::consts::FRAC_PI_2));
+    super::loading::set_destination_view(view);
+    commands.spawn((
+        Camera3d::default(),
+        Camera { order: 8, output_mode: CameraOutputMode::Skip,
+            clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
+        target.clone(), projection.clone(), *msaa,
+        view, RenderLayers::default(), Tonemapping::None, DebandDither::Disabled,
+        crate::shadow_render::ShadowCamera,
+        crate::level_switch::KeepAcrossLevels,
+        DestinationWarmup, Name::new("Destination pipeline warmup behind flight"),
+    ));
+}
+fn sky_policy(
+    mode: Res<crate::menu_render::MenuMode>,
+    movie: Res<crate::movie_render::MovieState>,
+    travel: Res<crate::travel_render::Travel>,
+    mut cams: Query<(&mut Camera, &mut Camera3d, &mut RenderLayers, Has<EyeSky>), Or<(With<EyeSky>, With<GameEye>)>>,
+    main: Query<(&Camera, Option<&RenderLayers>), (With<crate::fly_cam::FlyCam>, Without<EyeSky>, Without<GameEye>)>,
+    native_sky: Query<&RenderLayers, (With<crate::sky_render::SkyCamera>, Without<EyeSky>, Without<GameEye>)>,
+) {
+    let cinema = movie.busy() || matches!(mode.state.mode, rc_game::menus::mode::Mode::Movie | rc_game::menus::mode::Mode::Slideshow);
+    let sky_layers = native_sky.iter().next().cloned().unwrap_or_else(RenderLayers::none);
+    let (world_clear, world_layers) = main.iter().next()
+        .map(|(camera, layers)| (camera.clear_color, layers.cloned().unwrap_or_default()))
+        .unwrap_or((ClearColorConfig::Default, RenderLayers::default()));
+    for (mut c, mut d, mut layers, sky) in &mut cams {
         if sky {
+            *layers = if cinema { RenderLayers::none() } else { sky_layers.clone() };
             c.order = 10;
-            c.clear_color = ClearColorConfig::Default;
+            c.clear_color = if cinema || travel.blanked() { ClearColorConfig::Custom(Color::BLACK) } else { ClearColorConfig::Default };
             c.output_mode = CameraOutputMode::Skip;
             d.depth_load_op = Camera3dDepthLoadOp::Clear(0.0);
-        } else if world {
+        } else {
+            *layers = if cinema { RenderLayers::layer(PANEL_LAYER) } else { world_layers.clone().with(PANEL_LAYER) };
             c.order = 11;
-            c.clear_color = if has_sky {
-                ClearColorConfig::None
-            } else {
-                ClearColorConfig::Default
-            };
+            c.clear_color = if cinema { ClearColorConfig::None } else { world_clear };
             c.output_mode = CameraOutputMode::Write {
                 blend_state: Some(BlendState::REPLACE),
                 clear_color: ClearColorConfig::None,
             };
-            d.depth_load_op = if has_sky {
-                Camera3dDepthLoadOp::Load
-            } else {
-                Camera3dDepthLoadOp::Clear(0.0)
-            };
+            d.depth_load_op = Camera3dDepthLoadOp::Load;
         }
     }
 }
@@ -534,6 +617,9 @@ fn update_panels(
     settings: Res<Settings>,
     frame: Res<crate::display::GameFrame>,
     mode: Res<crate::menu_render::MenuMode>,
+    play: Option<Res<crate::gameplay::Play>>,
+    rig: Res<Rig>,
+    roots: Query<&Transform, (With<XrTrackingRoot>, Without<Panel>)>,
     hud: Query<
         &MaterialNode<crate::hud_render::HudComposite>,
         With<crate::hud_render::HudCompositeNode>,
@@ -552,9 +638,18 @@ fn update_panels(
     use rc_game::menus::mode::Mode;
     let menu = matches!(
         mode.state.mode,
-        Mode::Menu | Mode::Freeze | Mode::Vendor | Mode::Movie | Mode::Slideshow | Mode::Ship
+        Mode::Menu | Mode::Freeze | Mode::Vendor | Mode::Movie | Mode::Slideshow
     );
     let head = pose(views.as_deref()).unwrap_or_else(|| Transform::from_xyz(0.0, 1.6, 0.0));
+    // A turret's script camera follows its barrels. Keep the aiming HUD on that axis while the head turns freely.
+    let turret_forward = play.as_deref()
+        .filter(|p| p.game.hero.mode == 0 && p.game.hero.state == 0x32 && p.svc.vehicle.moby.is_none())
+        .and_then(|p| roots.iter().next().map(|root| (p, root)))
+        .and_then(|(p, root)| {
+            let world = crate::tfrag_render::game_to_bevy(p.game.camera.out.rows_f32()[0]);
+            let local = (root.rotation.inverse() * world).normalize_or_zero();
+            (local.length_squared() > 0.5).then_some(local)
+        });
     for (panel, mut t, mut visibility, material) in &mut panels {
         let image = match panel.0 {
             0 if menu => Some(frame.image.clone()),
@@ -580,7 +675,13 @@ fn update_panels(
                 m.base_color_texture = Some(image);
             }
         }
-        *t = head.mul_transform(Transform::from_xyz(0.0, 0.0, -2.0 - panel.0 as f32 * 0.002));
+        if let Some(forward) = turret_forward.filter(|_| panel.0 != 0) {
+            let anchor = rig.center.unwrap_or(head.translation);
+            *t = Transform::from_translation(anchor + forward * (2.0 - panel.0 as f32 * 0.002))
+                .looking_to(forward, Vec3::Y);
+        } else {
+            *t = head.mul_transform(Transform::from_xyz(0.0, 0.0, -2.0 - panel.0 as f32 * 0.002));
+        }
     }
 }
 fn audit(
@@ -589,7 +690,6 @@ fn audit(
     rendered: Res<Rendered>,
     draw: Res<DrawAudit>,
     play: Option<Res<crate::gameplay::Play>>,
-    pad: Option<Res<GamePad>>,
     xr_views: Option<Res<OxrViews>>,
     eyes: Query<Entity, With<GameEye>>,
     sky: Query<Entity, With<EyeSky>>,
@@ -605,11 +705,11 @@ fn audit(
         audit.first_tick = Some(tick);
     }
     if now.duration_since(audit.last).as_secs_f32() > 5.0 {
-        println!("VR_GAME live level={} ticks={} hero={:?} hero_state={:?} mesh_entities={} ratchet_meshes={} world_eyes={} sky_eyes={} render_frames={} min_world_draws={} min_sky_draws={} waiting_pipelines={} controls_active={} head_views={}",
+        println!("VR_GAME live level={} ticks={} hero={:?} hero_state={:?} mesh_entities={} ratchet_meshes={} world_eyes={} sky_eyes={} render_frames={} min_world_draws={} min_sky_draws={} waiting_pipelines={} head_views={}",
             crate::level_load::level_index(),tick,play.as_ref().map(|p|p.game.hero.position()),play.as_ref().map(|p|p.game.hero.state),
             meshes.iter().count(),ratchet.iter().count(),eyes.iter().count(),sky.iter().count(),rendered.0.load(Ordering::Relaxed),
             draw.world.load(Ordering::Relaxed),draw.sky.load(Ordering::Relaxed),draw.waiting.load(Ordering::Relaxed),
-            pad.as_ref().is_some_and(|p|p.active),xr_views.as_ref().map_or(0,|v|v.len()));
+            xr_views.as_ref().map_or(0,|v|v.len()));
         if let (Some(play), Some(camera)) = (play.as_ref(), main.iter().next()) {
             let hero = crate::tfrag_render::game_to_bevy(play.game.hero.position()) + Vec3::Y;
             let local = camera.compute_affine().inverse().transform_point3(hero);

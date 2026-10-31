@@ -1,7 +1,8 @@
 //! OpenXR integration into the original game. Calibration is an explicit diagnostic mode.
 mod game;
 mod game_input;
-pub use game_input::{GamePad,merge_pad};
+mod fullscreen_refresh;
+pub(crate) mod loading;
 pub use game::{prepare_game,game_plugins,install_game};
 mod actions;
 mod core;
@@ -26,7 +27,7 @@ pub struct Settings {
 impl Settings {
     fn from_env()->Result<Self> {
         let scene=std::env::var("RC_VR_SCENE").unwrap_or_else(|_|"novalis".into());
-        ensure!(matches!(scene.as_str(),"calibration"|"novalis"),"RC_VR_SCENE must be calibration or novalis");
+        ensure!(matches!(scene.as_str(),"calibration"|"novalis"|"kerwan"),"RC_VR_SCENE must be calibration, novalis or kerwan");
         let units_per_metre=std::env::var("RC_VR_UNITS_PER_METRE").unwrap_or_else(|_|"1".into())
             .parse::<f32>().context("RC_VR_UNITS_PER_METRE must be a number")?;
         core::game_to_metres([0.0;3],units_per_metre).map_err(anyhow::Error::msg)?;

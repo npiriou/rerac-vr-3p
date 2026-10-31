@@ -1,50 +1,40 @@
-# ReRAC VR
+<h1 align="center">Ratchet & Clank VR: Third Person</h1>
 
-An OpenXR integration overlay for the original [ReRAC](https://github.com/re-rac/rerac) game, pinned to upstream `89c87e98f9d8296187df2a6310c67b32144090d3`.
+Play the original *Ratchet & Clank* in a VR headset **with a normal PC gamepad**. You see Ratchet and Clank from the game's usual camera, now in stereo. Move your head to look around; the gamepad still controls movement, weapons, menus and the camera. VR motion controllers are not needed.
 
-`RC_VR=1` now starts the original application: its level loader, Ratchet controller and animations, moby simulation, scenery, weapons, collisions, audio and level transitions. Two OpenXR world cameras and matching sky cameras render the same entities and original materials. VR controls feed ReRAC's existing PS2 pad input. There is no separate VR implementation of movement or combat.
+This fan mod builds on [ReRAC](https://github.com/re-rac/rerac), the native PC port of the PS2 game. The planets, story and gameplay are ReRAC's work. For the first-person, hand-tracked version, see [Ratchet & Clank VR](https://github.com/npiriou/Rerac-vr).
 
-The initial gameplay view is **third person**. The headset adds stereo and head tracking to the original follow camera, while both sticks control the original game. Motion aiming and a first-person body conversion are not implemented. Existing upstream gameplay limitations remain.
+## What you need
 
-## Local use
+- A Windows PC and a VR headset that works with SteamVR.
+- [SteamVR](https://store.steampowered.com/app/250820/SteamVR/) set as your OpenXR runtime.
+- A normal PC gamepad.
+- Your own *Ratchet & Clank* PS2 disc image (`.iso`), original US version **SCUS-97199**. No game files are included.
 
-Apply to a fresh checkout of the pinned upstream commit with `Apply-Overlay.ps1 -Repository <path>`, then build with `scripts/vr/Build.ps1`.
+## How to play
 
-```powershell
-.\scripts\vr\Run.ps1 -Scene novalis -DataDir 'X:\dev\rerac\extracted'
-```
+1. Download `RatchetVR-3P-*.zip` from the [latest release](https://github.com/npiriou/Ratchet-VR-3P/releases/latest) and unzip it somewhere writable, such as Desktop or Documents.
+2. Turn on your headset and start SteamVR.
+3. Double-click **`RatchetVR-3P.exe`**. On the first launch, choose your `.iso` when asked. Extraction takes a few minutes and about 5 GB; later launches start directly.
 
-The default scene is now Novalis in the original game, with the original hero initialization and floor collision. Use your supported RAC1 extraction; no disc data or binaries are shipped here. Audio stays enabled unless you explicitly set `RC_AUDIO=0`.
-
-For an automated desktop check of the original game and both stereo rendering paths:
-
-```powershell
-.\scripts\vr\Run.ps1 -Scene novalis -DataDir 'X:\dev\rerac\extracted' -DesktopPreview -SmokeTestSeconds 12
-```
-
-The window remains playable with the original keyboard/gamepad controls. Preview renders two offscreen eye views; it does not simulate a headset. The old calibration room remains available only with explicit `-Scene calibration`.
+Your progress stays in the `saves` folder beside the launcher. Keep the `data` and `saves` folders when updating to a newer version.
 
 ## Controls
 
-| VR control (Touch / PICO through SteamVR) | Original game action |
+| PC gamepad (Xbox labels) | Action |
 | --- | --- |
-| Left stick | Move Ratchet relative to headset heading / navigate menus |
-| Right stick | Slower horizontal orbit of the original follow camera; head motion looks up/down |
-| Right A | Cross — jump / confirm |
-| Right B | Square — wrench |
-| Left X | Circle — equipped weapon |
-| Left Y | Triangle — quick select / back |
-| Left stick click | Select — map |
-| Right stick click | Start — pause |
-| Right trigger | Equipped weapon (additional binding) |
-| Left trigger | Strafe / aim |
-| Right grip | Crouch |
-| Keyboard F8 | Recenter headset |
+| Left stick | Move Ratchet |
+| Right stick | Move the original follow camera |
+| A | Jump / confirm |
+| X | Wrench |
+| B | Equipped weapon |
+| Y | Interact / quick select / back |
+| View / Back | Map |
+| Menu / Start | Pause |
+| Bumpers and triggers | Original L1/R1 and L2/R2 actions |
 
-A regular gamepad and the original keyboard bindings remain usable. Initial recenter waits until the headset is focused, rather than using its pose while on the desk. F8 recalibrates the physical headset pose without moving Ratchet. Camera pitch/roll come from physical head motion, keeping the virtual horizon level. The original pause menus and HUD are reused in headset panels.
+Press **F8** on the keyboard to recenter the headset. The game's original keyboard controls also work.
 
-## Implementation and validation
+## Thanks and support
 
-Guarded source edits are in `patch-manifest.json`; new modules and scripts are in `overlay/`. `resolved-Cargo.lock` pins the verified dependency graph. The default desktop path remains available without `RC_VR=1` and without the optional `vr` feature.
-
-The build script compiles by default without running tests. Only pass `-RunTests` when the user explicitly requests tests, as required by AGENTS.md. Tests from earlier runs are recorded separately. See [local build evidence](LOCAL_BUILD.md), [runtime records](STARTUP_READINESS.json), and [VR implementation details](overlay/docs/vr/README.md). Physical comfort, GPU/compositor budget and full campaign completion require separate validation.
+Thanks to the [ReRAC team](https://re-rac.github.io) for rebuilding the game. Please report issues with this VR mod [here](https://github.com/npiriou/Ratchet-VR-3P/issues), rather than to ReRAC. This is an unofficial fan project and is not affiliated with Sony Interactive Entertainment, Insomniac Games or the ReRAC team.
