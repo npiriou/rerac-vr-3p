@@ -13,7 +13,7 @@ This fan mod builds on [ReRAC](https://github.com/re-rac/rerac), the native PC p
 
 ## How to play
 
-1. Download `RatchetVR-3P-*.zip` from the [latest release](https://github.com/npiriou/Ratchet-VR-3P/releases/latest) and unzip it somewhere writable, such as Desktop or Documents.
+1. Download `RatchetVR-3P-*.zip` from the [latest release](https://github.com/npiriou/rerac-vr-3p/releases/latest) and unzip it somewhere writable, such as Desktop or Documents.
 2. Turn on your headset and start SteamVR.
 3. Double-click **`RatchetVR-3P.exe`**. On the first launch, choose your `.iso` when asked. Extraction takes a few minutes and about 5 GB; later launches start directly.
 
@@ -37,4 +37,4 @@ Press **F8** on the keyboard to recenter the headset. The game's original keyboa
 
 ## Thanks and support
 
-Thanks to the [ReRAC team](https://re-rac.github.io) for rebuilding the game. Please report issues with this VR mod [here](https://github.com/npiriou/Ratchet-VR-3P/issues), rather than to ReRAC. This is an unofficial fan project and is not affiliated with Sony Interactive Entertainment, Insomniac Games or the ReRAC team.
+Thanks to the [ReRAC team](https://re-rac.github.io) for rebuilding the game. Please report issues with this VR mod [here](https://github.com/npiriou/rerac-vr-3p/issues), rather than to ReRAC. This is an unofficial fan project and is not affiliated with Sony Interactive Entertainment, Insomniac Games or the ReRAC team.

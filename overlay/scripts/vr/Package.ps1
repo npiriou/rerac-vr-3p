@@ -73,7 +73,7 @@ Play with a normal PC gamepad. Move Ratchet with the left stick, move the origin
 and look around with your headset. VR motion controllers are not needed. Press F8 on the keyboard to recenter.
 
 Your progress is stored in the saves folder. Keep the game in a writable location such as Desktop or Documents.
-For controls and help: https://github.com/npiriou/Ratchet-VR-3P
+For controls and help: https://github.com/npiriou/rerac-vr-3p
 
 Fan project built on ReRAC (https://github.com/re-rac/rerac). No game data is included.
 "@
